@@ -13,9 +13,17 @@ import Control.Monad.Trans.Maybe
 import Control.Monad.IO.Class
 import System.IO
 
+
+mapOn range f list = mapOn' 0 range f list
+      where mapOn' _ [] _ ls = ls
+      	    mapOn' _ _ _ [] = []
+            mapOn' i (r:rs) f (l:ls)
+	    	   | i == r = (f l) : (mapOn' (i+1) rs f ls)
+	    	   | otherwise = l : (mapOn' (i+1) (r:rs) f ls)
+
 class (Num a) => ConduitDSP a where
-  lowPass :: a -> a -> Conduit [a] IO [a]
-  highPass :: a -> a -> Conduit [a] IO [a]
+  lowPass :: a -> Conduit [a] IO [a]
+  highPass :: a -> Conduit [a] IO [a]
   integrate :: Conduit [a] IO [a]
   
 instance (Num a) => Num [a] where
@@ -27,32 +35,38 @@ instance (Num a) => Num [a] where
   --fromInteger
   
 instance ConduitDSP Float where
-  lowPass rc dt = do
+  lowPass cf = do
     y <- await
     x <- await 
     case (x, y) of
       (Just x1, Just y1) -> 
-        let ny = Prelude.map (alpha*) x1 + Prelude.map ((1-alpha)*) y1
+        let ny = Prelude.map (a0*) x1 + Prelude.map (b1*) y1
         in do
           leftover ny
           yield ny
-          lowPass rc dt
+          lowPass cf
       _ -> return ()
-    where alpha = dt/(rc+dt)
+    where x = exp $ -2*pi*cf
+    	  a0 = 1-x
+	  b1 = x
 
-  highPass rc dt = do
+  highPass cf = do
     y <- await
     x0 <- await
     x1 <- await
     case (x0,x1,y) of
       (Just xi0,Just xi1, Just yi) ->
-        let ny = Prelude.map (alpha*) (yi + xi0 - xi1)
+        let ny = Prelude.map (a0*) xi0 + Prelude.map (a1*) xi1 + Prelude.map (b1*) yi
         in do 
+	  leftover xi1
           leftover ny
           yield ny
-          highPass rc dt
+          highPass cf
       _ -> return ()
-    where alpha = rc/(rc+dt)
+    where a0 = (1+x)/2
+    	  a1 = -(1+x)/2
+	  b1 = x
+	  x = exp $ -2*pi*cf
   
   integrate = do
     y <- await
@@ -66,12 +80,25 @@ instance ConduitDSP Float where
           integrate
       _ -> return ()
 
+
+signalGenerator :: Conduit Int IO [Float]
+signalGenerator = do
+  i <- await
+  case i of
+    Just n -> do
+     yield [sin $ c*(fromIntegral n)/1000 | c <- [1..10]]
+     signalGenerator
+    _ -> return ()
+
 -- source :: Source (MaybeT IO) [Int]
 -- source = sourceList [(0,0,0),(1,1,1),(1,1,1),(1,1,1),(1,1,1),(1,1,1)]
+-- main = do
+--    sourceList [0..1000] $= signalGenerator =$= highPass 0.01 $$ output
 
 main =  do
-  handle <- openFile "6axis.bin" ReadMode
-  sourceHandle handle $= bsToList =$= scale 250 2 =$= highPass 0.01 0.001 =$= integrate $$ output
+   handle <- openFile "6axis.bin" ReadMode
+   sourceHandle handle $= bsToList =$= scale 250 2 =$= lowPass 0.1  =$= integrate =$= integrate $$ output
+
 
 bsToList :: Conduit BS.ByteString IO [Int16]
 bsToList = do 
@@ -101,7 +128,7 @@ scale g a = do
   where ca = fromIntegral a / fromIntegral 0x7FFF :: Float
         cg = fromIntegral g / fromIntegral 0x7FFF  :: Float
       
-output ::   Sink [Float] IO ()
+output :: Sink [Float] IO ()
 output = do
   a <- await
   case a of
@@ -111,7 +138,3 @@ output = do
       output
     _ -> return ()
     
-
-sink :: Sink String IO ()
-sink = CL.mapM_ putStrLn
-

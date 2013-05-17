@@ -14,8 +14,8 @@ import Control.Monad.IO.Class
 import System.IO
 
 class (Num a) => ConduitDSP a where
-  lowPass :: a -> Conduit [a] IO [a]
-  highPass :: a -> a -> a -> a -> a -> Conduit [a] IO [a]
+  lowPass :: a -> a -> Conduit [a] IO [a]
+  highPass :: a -> a -> Conduit [a] IO [a]
   integrate :: Conduit [a] IO [a]
   
 instance (Num a) => Num [a] where
@@ -27,53 +27,51 @@ instance (Num a) => Num [a] where
   --fromInteger
   
 instance ConduitDSP Float where
-  lowPass a1 = do
+  lowPass rc dt = do
     y <- await
     x <- await 
     case (x, y) of
       (Just x1, Just y1) -> 
-        let ny = y1 + Prelude.map (\n -> n*a1) (x1 - y1)
+        let ny = Prelude.map (alpha*) x1 + Prelude.map ((1-alpha)*) y1
         in do
           leftover ny
           yield ny
-          lowPass a1
+          lowPass rc dt
       _ -> return ()
+    where alpha = dt/(rc+dt)
 
-  highPass a1 a2 b0 b1 b2 = do
-    d1 <- await
-    d2 <- await
-    x <- await
-    case (x,d1,d2) of
-      (Just xi, Just d1i, Just d2i) -> 
-        let di = nextDY 1 a1 a2 xi d1i d2i
-            y = nextDY b0 b1 b2 di d1i d2i
+  highPass rc dt = do
+    y <- await
+    x0 <- await
+    x1 <- await
+    case (x0,x1,y) of
+      (Just xi0,Just xi1, Just yi) ->
+        let ny = Prelude.map (alpha*) (yi + xi0 - xi1)
         in do 
-          leftover d1i
-          leftover di
-          yield y
-          highPass a1 a2 b0 b1 b2
+          leftover ny
+          yield ny
+          highPass rc dt
       _ -> return ()
-    where nextDY a0 a1 a2 a b c = Prelude.map (\(x,y,z) -> a0*x + a1*y +a2*z) $ zip3 a b c
+    where alpha = rc/(rc+dt)
   
   integrate = do
     y <- await
     x <- await
     case (x,y) of
       (Just xi, Just yi) ->
-        let yy = nextY xi yi
+        let yy = xi + yi
         in do
           leftover yy
           yield yy
           integrate
       _ -> return ()
-    where nextY a b = Prelude.map (\(x,y) -> x+y) $ Prelude.zip a b
 
 -- source :: Source (MaybeT IO) [Int]
 -- source = sourceList [(0,0,0),(1,1,1),(1,1,1),(1,1,1),(1,1,1),(1,1,1)]
 
 main =  do
   handle <- openFile "6axis.bin" ReadMode
-  sourceHandle handle $= bsToList =$= scale 250 2 =$= lowPass 0.8  $$ output
+  sourceHandle handle $= bsToList =$= scale 250 2 =$= highPass 0.01 0.001 =$= integrate $$ output
 
 bsToList :: Conduit BS.ByteString IO [Int16]
 bsToList = do 
@@ -108,9 +106,11 @@ output = do
   a <- await
   case a of
     Just str -> do 
-      liftIO $ print str
+      liftIO $ Prelude.mapM_ (Prelude.putStr.(++" ").show) str
+      liftIO $ putStrLn ""
       output
     _ -> return ()
+    
 
 sink :: Sink String IO ()
 sink = CL.mapM_ putStrLn

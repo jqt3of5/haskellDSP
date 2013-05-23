@@ -1,30 +1,32 @@
 {-# LANGUAGE MultiParamTypeClasses, FlexibleInstances #-}
-
+import Control.Concurrent hiding (yield)
+import Control.Monad.STM
 import Data.Conduit
-import Data.Conduit.List as CL
+import Data.Conduit.List as CL hiding(map)
+
 import Data.Conduit.Binary as BN
+import Data.Conduit.TMChan
 import Data.Binary.Get
 import Data.Word
 import Data.Int
 
-import Data.ByteString as BS hiding (putStrLn)
-import Data.ByteString.Lazy as BSL hiding (putStrLn)
+import Data.ByteString as BS hiding (putStrLn, map)
+import Data.ByteString.Lazy as BSL hiding (putStrLn,map)
 import Control.Monad.Trans.Maybe
 import Control.Monad.IO.Class
 import System.IO
 
-
-mapOn range f list = mapOn' 0 range f list
-      where mapOn' _ [] _ ls = ls
-      	    mapOn' _ _ _ [] = []
-            mapOn' i (r:rs) f (l:ls)
-	    	   | i == r = (f l) : (mapOn' (i+1) rs f ls)
-	    	   | otherwise = l : (mapOn' (i+1) (r:rs) f ls)
+-- mapOn range f list = mapOn' 0 range f list
+--       where mapOn' _ [] _ ls = ls
+--       	    mapOn' _ _ _ [] = []
+--             mapOn' i (r:rs) f (l:ls)
+-- 	    	   | i == r = (f l) : (mapOn' (i+1) rs f ls)
+-- 	    	   | otherwise = l : (mapOn' (i+1) (r:rs) f ls)
 
 class (Num a) => ConduitDSP a where
   lowPass :: a -> Conduit [a] IO [a]
   highPass :: a -> Conduit [a] IO [a]
-  integrate :: Conduit [a] IO [a]
+  integrate :: a -> Conduit [a] IO [a]
   
 instance (Num a) => Num [a] where
   (+) a b = Prelude.map (\(x,y) -> x+y) $ Prelude.zip a b
@@ -68,16 +70,16 @@ instance ConduitDSP Float where
 	  b1 = x
 	  x = exp $ -2*pi*cf
   
-  integrate = do
+  integrate dt = do
     y <- await
     x <- await
     case (x,y) of
       (Just xi, Just yi) ->
-        let yy = xi + yi
+        let yy = yi + Prelude.map (dt*) xi
         in do
           leftover yy
           yield yy
-          integrate
+          integrate dt
       _ -> return ()
 
 
@@ -95,11 +97,39 @@ signalGenerator = do
 -- main = do
 --    sourceList [0..1000] $= signalGenerator =$= highPass 0.01 $$ output
 
-main =  do
-   handle <- openFile "6axis.bin" ReadMode
-   sourceHandle handle $= bsToList =$= scale 250 2 =$= lowPass 0.1  =$= integrate =$= integrate $$ output
+-- main =  do
+--    handle <- openFile "6axis.bin" ReadMode
+--    sourceHandle handle $= bsToList =$= scale 250 2 =$= lowPass 0.1  =$= integrate =$= integrate $$ output
 
-
+main = do
+  hGyro <- openFile "6axis.gyro" ReadMode
+  hAcc <- openFile "6axis.acc" ReadMode
+  chanGyro <- atomically $ newTBMChan 1000
+  chanGrav <- atomically $ newTBMChan 1000
+  chanAcc <- atomically $ newTBMChan 1000
+--  forkIO $ sourceList [[1.0,1.0,1.0,1.0] | x <- [1..10]] $$ sinkTBMChan chanG
+--  forkIO $ sourceList [[2.0,2.0,2.0,2.0] | x <- [1..10]] $$ sinkTBMChan chanA
+--  forkIO $ sourceHandle hGyro $= bsToList =$= scale 250 =$= highPass 0.495 =$= integrate 1 =$= integrate 1 $$ sinkTBMChan chanGyro -- integrated gyro
+  forkIO $ sourceHandle hAcc $= bsToList =$= scale 2 =$= antiGravFilter 0.05 $$ sinkTBMChan chanAcc -- main 
+--  forkIO $ sourceHandle hAcc $= bsToList =$= scale 2  $$ sinkTBMChan chanGrav --gravity
+  runResourceT $ sourceTBMChan chanAcc $$ outSink
+--  mergedSource <- runResourceT $ sourceTBMChan chanGrav >=< sourceTBMChan chanAcc
+--  runResourceT $ mergedSource $$ outSink
+   
+antiGravFilter :: Float -> Conduit [Float] IO [Float]
+antiGravFilter cf = do
+  a <- await
+  b <- await
+  case (a,b) of
+    (Just y, Just x) -> 
+      let ny = map (alpha*) (x-y) 
+      in do 
+        leftover ny
+        yield ny
+        antiGravFilter cf
+    _ -> return ()
+  where alpha = exp $ -2*pi*cf
+            
 bsToList :: Conduit BS.ByteString IO [Int16]
 bsToList = do 
   bs <- BN.take 12
@@ -110,31 +140,28 @@ bsToList = do
 
 deserialize :: Get [Int16]
 deserialize = do
-  ax <- getWord16le
-  ay <- getWord16le
-  az <- getWord16le
-  gx <- getWord16le
-  gy <- getWord16le
-  gz <- getWord16le
-  return [fromIntegral ax,fromIntegral ay,fromIntegral az,fromIntegral gx,fromIntegral gy,fromIntegral gz]
+  x <- getWord16le
+  y <- getWord16le
+  z <- getWord16le
+  return [fromIntegral x,fromIntegral y,fromIntegral z]
 
-scale :: Int -> Int -> Conduit [Int16] IO [Float]
-scale g a = do
+scale :: Int -> Conduit [Int16] IO [Float]
+scale sc = do
   i <- await
   case i of 
     Just x -> do    
-      yield $ Prelude.map (\(a,b) -> a*b) $ Prelude.zip [ca,ca,ca,cg,cg,cg] $ Prelude.map fromIntegral x
-      scale g a
-  where ca = fromIntegral a / fromIntegral 0x7FFF :: Float
-        cg = fromIntegral g / fromIntegral 0x7FFF  :: Float
-      
-output :: Sink [Float] IO ()
-output = do
+      yield $ Prelude.map (ca*) $ Prelude.map fromIntegral x
+      scale sc
+  where ca = fromIntegral sc / fromIntegral 0x7FFF :: Float
+       
+          
+outSink:: (Show a) => Sink [a] (ResourceT IO) ()
+outSink= do
   a <- await
   case a of
     Just str -> do 
       liftIO $ Prelude.mapM_ (Prelude.putStr.(++" ").show) str
       liftIO $ putStrLn ""
-      output
+      outSink
     _ -> return ()
     

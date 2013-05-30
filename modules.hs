@@ -16,72 +16,86 @@ import Control.Monad.Trans.Maybe
 import Control.Monad.IO.Class
 import System.IO
 
--- mapOn range f list = mapOn' 0 range f list
---       where mapOn' _ [] _ ls = ls
---       	    mapOn' _ _ _ [] = []
---             mapOn' i (r:rs) f (l:ls)
--- 	    	   | i == r = (f l) : (mapOn' (i+1) rs f ls)
--- 	    	   | otherwise = l : (mapOn' (i+1) (r:rs) f ls)
+import Debug.Trace 
 
 class (Num a) => ConduitDSP a where
-  lowPass :: a -> Conduit [a] IO [a]
-  highPass :: a -> Conduit [a] IO [a]
-  integrate :: a -> Conduit [a] IO [a]
+  lowPassC :: a -> Conduit [a] IO [a]
+  highPassC :: a -> Conduit [a] IO [a]
+  integrateC :: a -> Conduit [a] IO [a]
   
 instance (Num a) => Num [a] where
   (+) a b = Prelude.map (\(x,y) -> x+y) $ Prelude.zip a b
   (*) a b = Prelude.map (\(x,y) -> x*y) $ Prelude.zip a b
-  (-) a b = Prelude.map (\(x,y) -> x*y) $ Prelude.zip a b
+  (-) a b = Prelude.map (\(x,y) -> x-y) $ Prelude.zip a b
   abs a = Prelude.map abs a
   --signum
   --fromInteger
   
+integrate dt x y = y + Prelude.map (dt*) x
+
+highPass cf x0 x1 y =  Prelude.map (a0*) x0 + Prelude.map (a1*) x1 + Prelude.map (b1*) y
+  where a0 = (1+c)/c
+        a1 = -(1+c)/c
+        b1 = c
+        c = exp $ -2*pi*cf
+lowPass cf x y = Prelude.map (a0*) x + Prelude.map (b1*) y
+  where c = exp $ -2*pi*cf
+        a0 = 1-c
+        b1 = c
+        
 instance ConduitDSP Float where
-  lowPass cf = do
+  lowPassC cf = do
     y <- await
     x <- await 
     case (x, y) of
       (Just x1, Just y1) -> 
-        let ny = Prelude.map (a0*) x1 + Prelude.map (b1*) y1
+        let ny = lowPass cf x1 y1
         in do
           leftover ny
           yield ny
-          lowPass cf
+          lowPassC cf
       _ -> return ()
-    where x = exp $ -2*pi*cf
-    	  a0 = 1-x
-	  b1 = x
-
-  highPass cf = do
+                   
+  highPassC cf = do
     y <- await
     x0 <- await
     x1 <- await
     case (x0,x1,y) of
       (Just xi0,Just xi1, Just yi) ->
-        let ny = Prelude.map (a0*) xi0 + Prelude.map (a1*) xi1 + Prelude.map (b1*) yi
+        let ny = highPass cf xi0 xi1 yi
         in do 
 	  leftover xi1
           leftover ny
           yield ny
-          highPass cf
+          highPassC cf
       _ -> return ()
-    where a0 = (1+x)/2
-    	  a1 = -(1+x)/2
-	  b1 = x
-	  x = exp $ -2*pi*cf
   
-  integrate dt = do
+
+    
+  integrateC dt = do
     y <- await
     x <- await
     case (x,y) of
       (Just xi, Just yi) ->
-        let yy = yi + Prelude.map (dt*) xi
+        let yy = integrate dt xi yi
         in do
           leftover yy
           yield yy
-          integrate dt
+          integrateC dt
       _ -> return ()
 
+antiGravConduit cf = do
+  a <- await
+  b <- await
+  case (a,b) of
+    (Just y, Just x) -> 
+      let ny = lowPass cf x y
+          gx = trace ("x: " ++ show x ++ " ny: " ++ show ny ++ " x-ny: " ++ show (x-ny)) $  x - ny
+      in do 
+        leftover ny
+        yield gx
+        antiGravConduit cf
+    _ -> return ()
 
 signalGenerator :: Conduit Int IO [Float]
 signalGenerator = do
@@ -104,32 +118,29 @@ signalGenerator = do
 main = do
   hGyro <- openFile "6axis.gyro" ReadMode
   hAcc <- openFile "6axis.acc" ReadMode
-  chanGyro <- atomically $ newTBMChan 1000
-  chanGrav <- atomically $ newTBMChan 1000
-  chanAcc <- atomically $ newTBMChan 1000
---  forkIO $ sourceList [[1.0,1.0,1.0,1.0] | x <- [1..10]] $$ sinkTBMChan chanG
---  forkIO $ sourceList [[2.0,2.0,2.0,2.0] | x <- [1..10]] $$ sinkTBMChan chanA
+  --chanGyro <- atomically $ newTBMChan 1000
+  --chanGrav <- atomically $ newTBMChan 1000
+  --chanAcc <- atomically $ newTBMChan 1000
 --  forkIO $ sourceHandle hGyro $= bsToList =$= scale 250 =$= highPass 0.495 =$= integrate 1 =$= integrate 1 $$ sinkTBMChan chanGyro -- integrated gyro
-  forkIO $ sourceHandle hAcc $= bsToList =$= scale 2 =$= antiGravFilter 0.05 $$ sinkTBMChan chanAcc -- main 
---  forkIO $ sourceHandle hAcc $= bsToList =$= scale 2  $$ sinkTBMChan chanGrav --gravity
-  runResourceT $ sourceTBMChan chanAcc $$ outSink
---  mergedSource <- runResourceT $ sourceTBMChan chanGrav >=< sourceTBMChan chanAcc
---  runResourceT $ mergedSource $$ outSink
-   
-antiGravFilter :: Float -> Conduit [Float] IO [Float]
-antiGravFilter cf = do
+--  sourceHandle hAcc $= bsToList =$= scale 2  =$= antiGravConduit 0.01 =$= lowPassC 0.45 $$ basicPrint 
+  --sourceHandle hAcc $= bsToList =$= scale 2  $$ basicPrint 
+--  sourceHandle hAcc $= bsToList =$= scale 2  =$= lowPassC 0.01 $$ basicPrint 
+  sourceHandle hAcc $= bsToList =$= scale 2  =$= antiGravConduit 0.01 =$= lowPassC 0.45 =$= integrateC 1 =$= integrateC 1 $$ basicPrint -- $$ sinkTBMChan chanGrav --gravity
+  --runResourceT $ sourceTBMChan chanAcc $$ outSink
+  --mergedSource <- runResourceT $ sourceTBMChan chanGrav >=< sourceTBMChan chanAcc
+  --runResourceT $ mergedSource $$ outSink
+  
+
+basicPrint :: (Show a) => Sink [a] IO ()
+basicPrint = do
   a <- await
-  b <- await
-  case (a,b) of
-    (Just y, Just x) -> 
-      let ny = map (alpha*) (x-y) 
-      in do 
-        leftover ny
-        yield ny
-        antiGravFilter cf
+  case a of
+    Just str -> do 
+      liftIO $ Prelude.mapM_ (Prelude.putStr.(++" ").show) str
+      liftIO $ putStrLn ""
+      basicPrint
     _ -> return ()
-  where alpha = exp $ -2*pi*cf
-            
+
 bsToList :: Conduit BS.ByteString IO [Int16]
 bsToList = do 
   bs <- BN.take 12

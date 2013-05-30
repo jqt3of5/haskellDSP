@@ -3,8 +3,8 @@
 
 int main(int argc, char ** argv)
 {
-  if (argc != 4)
-    return 1;
+  /* if (argc != 4) */
+  /*   return 1; */
 
   FILE * fin = fopen(argv[1], "r");
   FILE * fout0 = fopen(argv[2], "w");

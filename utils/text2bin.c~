@@ -1,0 +1,26 @@
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(int argc, char ** argv)
+{
+
+  if (argc != 3)
+    return 1;
+
+  FILE * fin = fopen(argv[1], "r");
+  FILE * fout = fopen(argv[2], "w");
+
+  int gx,gy,gz,ax,ay,az;
+  while (!feof(fin))
+    {
+      fscanf(fin, "%d %d %d %d %d %d\n", &gx, &gy, &gz, &ax, &ay, &az);
+      fwrite(&gx, sizeof(short), 1, fout);
+      fwrite(&gy, sizeof(short), 1, fout);
+      fwrite(&gz, sizeof(short), 1, fout);
+      fwrite(&ax, sizeof(short), 1, fout);
+      fwrite(&ay, sizeof(short), 1, fout);
+      fwrite(&az, sizeof(short), 1, fout);
+    }
+
+
+}

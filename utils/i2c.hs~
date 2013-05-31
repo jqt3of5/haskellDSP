@@ -1,0 +1,7 @@
+init = openFile "/dev/i2c-1" ReadWriteMode
+
+read file reg 0 = []
+read file count 
+  = do
+    (hGetChar file) : (read file $ count - 1)
+  
